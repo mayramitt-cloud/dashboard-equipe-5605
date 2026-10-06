@@ -802,6 +802,9 @@
             .ag-row { grid-template-columns: 1fr 1fr; }
         }
     </style>
+    <!-- Firebase Scripts -->
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
 </head>
 <body>
     <div class="container">
@@ -1048,6 +1051,26 @@
         let casos = [];
         const F = {};                 // filtros por aba
         const resAbertos = new Set(); // linhas abertas em Resolvidos
+
+        // Firebase
+        let firebaseApp, db, firebaseReady = false;
+        const firebaseConfig = {
+          apiKey: "AIzaSyCvLYYNWrHpyTxHMKw34Oxf74dKutb8klM",
+          authDomain: "dashboard-equipe-5605.firebaseapp.com",
+          projectId: "dashboard-equipe-5605",
+          storageBucket: "dashboard-equipe-5605.firebasestorage.app",
+          messagingSenderId: "773217948099",
+          appId: "1:773217948099:web:4e09c3d1d70fd2c1afc97a"
+        };
+        try {
+            firebaseApp = firebase.initializeApp(firebaseConfig);
+            db = firebase.firestore();
+            firebaseReady = true;
+            console.log("✅ Firebase inicializado com sucesso!");
+        } catch (e) {
+            console.error("❌ Erro ao inicializar Firebase:", e);
+            firebaseReady = false;
+        }
 
         // ================= UTILITÁRIOS =================
         const pad = n => String(n).padStart(2, '0');
