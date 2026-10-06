@@ -1214,7 +1214,9 @@
                 
                 // Renderizar dados locais
                 renderizar();
-        
+        } catch(e) { console.error(e); }
+        }
+
         function salvarEdicao(id) {
             const c = getCaso(id); const v = x => document.getElementById(x).value.trim();
             if (!v('e-nome') || !v('e-acs')) { alert('Nome e ACS são obrigatórios.'); return; }
