@@ -1192,9 +1192,16 @@
                         });
 
                         if (primeiraVez) {
-                            // Primeira vez: carregar TODOS os casos do Firebase
-                            casos = firebaseCasos;
                             primeiraVez = false;
+                            // Primeira vez: se Firebase tem dados, carregar. Se não, salvar dados locais no Firebase
+                            if (firebaseCasos.length > 0) {
+                                casos = firebaseCasos;
+                            } else if (casos.length > 0) {
+                                // Salvar casos locais no Firebase
+                                casos.forEach(c => {
+                                    db.collection('casos').doc(c.id).set(c).catch(err => console.warn("Erro ao salvar caso no Firebase:", err));
+                                });
+                            }
                         } else {
                             // Depois: apenas adicionar casos novos
                             const idsExistentes = new Set(casos.map(c => c.id));
