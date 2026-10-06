@@ -756,10 +756,6 @@
         .acoes-destino { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; position: relative; z-index: 1; }
         .acoes-destino .rotulo { width: 100%; font-size: 11px; font-weight: 700; color: #6B7280; text-transform: uppercase; }
         .btn-toggle { background: white; color: #6D28D9; border: 2px solid #8B5CF6; }
-        .btn-prio { background: white; color: #B91C1C; border: 2px solid #FCA5A5; }
-        .btn-prio:hover { background: #FEF2F2; }
-        .btn-prio.on { background: #DC2626; color: white; border-color: #991B1B; }
-        .card-prio { border-color: #DC2626 !important; box-shadow: 0 0 0 2px #FECACA; }
         .btn-toggle.on { background: #10B981; color: white; border-color: #047857; }
 
         .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 22px; }
@@ -802,7 +798,6 @@
             .ag-row { grid-template-columns: 1fr 1fr; }
         }
     </style>
-    <!-- Firebase Scripts -->
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
 </head>
@@ -881,10 +876,6 @@
                     <div class="form-group">
                         <label>📅 Data do registro</label>
                         <input type="date" id="data">
-                    </div>
-                    <div class="form-group">
-                        <label>Prioridade</label>
-                        <button type="button" id="btn-prio-form" class="btn-prio" onclick="this.classList.toggle('on'); this.textContent = this.classList.contains('on') ? '🚩 ACS considera prioridade ✓' : '🚩 ACS considera prioridade'" style="padding:11px;font-size:13px;">🚩 ACS considera prioridade</button>
                     </div>
                     <div class="form-group full">
                         <label>📋 Linhas de Cuidado (Múltiplas) *</label>
@@ -1053,7 +1044,7 @@
         const resAbertos = new Set(); // linhas abertas em Resolvidos
 
         // Firebase
-        let firebaseApp, db, firebaseReady = false;
+        let db, firebaseReady = false;
         const firebaseConfig = {
           apiKey: "AIzaSyCvLYYNWrHpyTxHMKw34Oxf74dKutb8klM",
           authDomain: "dashboard-equipe-5605.firebaseapp.com",
@@ -1063,13 +1054,24 @@
           appId: "1:773217948099:web:4e09c3d1d70fd2c1afc97a"
         };
         try {
-            firebaseApp = firebase.initializeApp(firebaseConfig);
+            firebase.initializeApp(firebaseConfig);
             db = firebase.firestore();
             firebaseReady = true;
-            console.log("✅ Firebase inicializado com sucesso!");
+            // Escutar novos casos do Firebase
+            db.collection('casos').onSnapshot(snapshot => {
+                snapshot.docChanges().forEach(change => {
+                    if (change.type === 'added') {
+                        const caso = { id: change.doc.id, ...change.doc.data() };
+                        if (!casos.find(c => c.id === caso.id)) {
+                            casos.push(caso);
+                            localStorage.setItem('casos', JSON.stringify(casos));
+                            renderizar();
+                        }
+                    }
+                });
+            });
         } catch (e) {
-            console.error("❌ Erro ao inicializar Firebase:", e);
-            firebaseReady = false;
+            console.warn("Firebase não inicializou", e);
         }
 
         // ================= UTILITÁRIOS =================
@@ -1082,7 +1084,17 @@
         const acsNome = k => { const a = acsObj(k); return a ? `${a.nome} (Micro ${a.micro})` : (k || '—'); };
         const ordemMicro = k => acsObj(k)?.micro ?? 99;
         const getCaso = id => casos.find(c => c.id === id);
-        function salvar() { try { localStorage.setItem('casos', JSON.stringify(casos)); } catch (e) { console.warn(e); } }
+        function salvar() {
+            try {
+                localStorage.setItem('casos', JSON.stringify(casos));
+                // Salvar no Firebase também
+                if (firebaseReady && db) {
+                    casos.forEach(c => {
+                        db.collection('casos').doc(c.id).set(c).catch(e => console.warn("Erro Firebase:", e));
+                    });
+                }
+            } catch (e) { console.warn(e); }
+        }
         function log(c, texto, data) { c.historico = c.historico || []; c.historico.push({ data: data || hoje(), texto }); }
         function toast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.style.display = 'block'; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 2600); }
 
@@ -1178,45 +1190,6 @@
                     localStorage.removeItem('vds');
                 }
                 salvar();
-
-                // Sincronizar com Firebase em tempo real
-                if (firebaseReady && db) {
-                    let primeiraVez = true;
-                    const unsubscribe = db.collection('casos').onSnapshot((snapshot) => {
-                        const firebaseCasos = [];
-                        snapshot.forEach((doc) => {
-                            firebaseCasos.push({
-                                id: doc.id,
-                                ...doc.data()
-                            });
-                        });
-
-                        if (primeiraVez) {
-                            primeiraVez = false;
-                            // Primeira vez: se Firebase tem dados, carregar. Se não, salvar dados locais no Firebase
-                            if (firebaseCasos.length > 0) {
-                                casos = firebaseCasos;
-                            } else if (casos.length > 0) {
-                                // Salvar casos locais no Firebase
-                                casos.forEach(c => {
-                                    db.collection('casos').doc(c.id).set(c).catch(err => console.warn("Erro ao salvar caso no Firebase:", err));
-                                });
-                            }
-                        } else {
-                            // Depois: apenas adicionar casos novos
-                            const idsExistentes = new Set(casos.map(c => c.id));
-                            for (let caso of firebaseCasos) {
-                                if (!idsExistentes.has(caso.id)) {
-                                    casos.push(caso);
-                                }
-                            }
-                        }
-
-                        localStorage.setItem('casos', JSON.stringify(casos));
-                        renderizar();
-                        console.log("✅ Sincronizado com Firebase!");
-                    });
-                }
             } catch (e) { console.error('Erro ao carregar dados', e); }
         }
         const proximoId = () => casos.reduce((m, c) => Math.max(m, Number(c.id) || 0), 322) + 1;
@@ -1239,7 +1212,7 @@
             const busca = { key: 'busca', label: '🔎', busca: true };
             const defs = {
                 pendentes: [acs,
-                    { key: 'prio', label: 'Prioridade', opts: [['', '🔓 Todos'], ['sim', '🚩 Só os que a ACS considera prioridade']] },
+                    { key: 'prio', label: 'Prioridade', opts: [['', '🔓 Todos'], ['sim', '🚩 Só prioritários']] },
                     { key: 'origem', label: 'Origem', opts: [['', '🔓 Todas'], ['forms', '📨 Formulário das ACS'], ['manual', '✍️ Registrado no dashboard']] },
                     busca],
                 resolvidos: [acs,
@@ -1328,10 +1301,8 @@
                 id: proximoId(), nome: v('nome'), num_familia: v('num_familia'), cpf: v('cpf'), data_nasc: v('data_nasc'),
                 descricao: v('descricao'), desfecho: v('desfecho'), linhas_cuidado: linhas, status: 'pendente',
                 acs_responsavel: v('acs_responsavel'), quem_traz: quem, data_criacao: data, destinos: {},
-                prioritario: document.getElementById('btn-prio-form').classList.contains('on'),
                 historico: [{ data, texto: `Caso registrado — trazido por ${quem}` }]
             };
-            if (c.prioritario) log(c, '🚩 ACS considera prioridade', data);
             casos.push(c);
             salvar();
             renderizar();
@@ -1344,7 +1315,6 @@
             ['nome', 'descricao', 'desfecho', 'num_familia', 'cpf', 'data_nasc', 'acs_responsavel', 'quem_traz', 'outro_prof'].forEach(id => document.getElementById(id).value = '');
             document.getElementById('outro-prof-group').style.display = 'none';
             document.querySelectorAll('.linha-cuidado').forEach(el => el.checked = false);
-            const bp = document.getElementById('btn-prio-form'); bp.classList.remove('on'); bp.textContent = '🚩 ACS considera prioridade';
             document.getElementById('data').value = hoje();
             previewIdade();
             if (!manterMsg) document.getElementById('formMessage').style.display = 'none';
@@ -1519,7 +1489,6 @@
                 acoes = `<div class="acoes-destino"><span class="rotulo">Dar destino ao caso:</span>
                     ${Object.entries(DESTINOS).map(([k, d]) => `<button class="btn-primary" onclick="abrirDestino(${c.id},'${k}')">${d.icone} ${d.botao}</button>`).join('')}</div>
                     <div class="case-actions">
-                        <button class="btn-prio ${c.prioritario ? 'on' : ''}" onclick="togglePrioridade(${c.id})">🚩 ACS considera prioridade${c.prioritario ? ' ✓' : ''}</button>
                         <button class="btn-secondary" onclick="abrirEdicao(${c.id})">✏️ Editar dados</button>
                         <button class="btn-resolve" onclick="marcarResolvido(${c.id})">✅ Resolvido</button>
                         <button class="btn-danger" onclick="deletarCaso(${c.id})">🗑️ Remover</button></div>`;
@@ -1535,9 +1504,9 @@
                         <button class="btn-danger" onclick="deletarCaso(${c.id})">🗑️ Remover</button></div>`;
             }
 
-            return `<div class="case-card ${c.prioritario ? 'card-prio' : ''}" id="card-${ctx}-${c.id}">
+            return `<div class="case-card" id="card-${ctx}-${c.id}">
                 <div class="case-header">
-                    <div><div class="case-name">👤 ${esc(c.nome)} ${idadeBadge(c)} ${c.prioritario ? `<span class="tag bad">🚩 ACS considera prioridade</span>` : ''}</div></div>
+                    <div><div class="case-name">👤 ${esc(c.nome)} ${idadeBadge(c)} ${c.prioritario ? `<span class="tag bad" style="cursor:pointer" title="Clique para desmarcar" onclick="togglePrioridade(${c.id})">🚩 Prioritário</span>` : `<span class="tag" style="cursor:pointer;background:#F3F4F6;color:#9CA3AF;" title="Marcar como prioritário" onclick="togglePrioridade(${c.id})">⚑</span>`}</div></div>
                     <div style="text-align:right;">${tagsDestinos(c, ctx === 'pendvd' ? 'vd' : ctx)}<span class="case-id">ID: ${c.id}</span></div>
                 </div>
                 ${idStrip(c)}
@@ -1643,7 +1612,7 @@
                         const v = c.destinos.vd, ab = vdAbertas.has(c.id), atras = v.data_prevista && v.data_prevista < h;
                         return `<div class="ag-row">
                             <div><input type="date" class="inline-edit" style="${atras ? 'border-color:#DC2626;color:#DC2626;font-weight:700;' : ''}" value="${esc(v.data_prevista)}" title="Alterar a data da VD" onchange="setDestino(${c.id},'vd','data_prevista',this.value,true)"></div>
-                            <div><b>${esc(c.nome)}</b> ${idadeBadge(c)} ${c.prioritario ? '<span class="tag bad" title="ACS considera prioridade">🚩</span>' : ''}</div>
+                            <div><b>${esc(c.nome)}</b> ${idadeBadge(c)}</div>
                             <div>${esc(acsNome(c.acs_responsavel))}</div>
                             <div style="color:#4B5563;">${esc((v.motivo || c.desfecho || '').slice(0, 110))}${(v.motivo || '').length > 110 ? '…' : ''}</div>
                             <div style="font-size:11.5px;color:#6B7280;">${fmt(v.solicitado_em)}<br>${esc(v.solicitado_por) || '—'}</div>
@@ -1705,7 +1674,7 @@
                     const ab = resAbertos.has(c.id);
                     const hist = [...(c.historico || [])].sort((a, b) => (a.data || '').localeCompare(b.data || ''));
                     return `<div class="res-row ${ab ? 'aberto' : ''}" onclick="toggleRes(${c.id})">
-                        <div><b>${esc(c.nome)}</b> ${idadeBadge(c)} ${c.prioritario ? '<span class="tag bad" title="ACS considera prioridade">🚩</span>' : ''}</div>
+                        <div><b>${esc(c.nome)}</b> ${idadeBadge(c)}</div>
                         <div>${fmt(c.data_criacao)}</div>
                         <div>${esc(acsNome(c.acs_responsavel))}</div>
                         <div>${fmt(c.data_resolucao)}</div>
@@ -1933,7 +1902,7 @@
 
         function togglePrioridade(id) {
             const c = getCaso(id); c.prioritario = !c.prioritario;
-            log(c, c.prioritario ? '🚩 ACS considera prioridade' : 'Desmarcado: ACS considera prioridade');
+            log(c, c.prioritario ? '🚩 Marcado como prioritário' : 'Prioridade removida');
             salvar(); renderizar();
         }
         function marcarResolvido(id) {
@@ -2028,7 +1997,7 @@
 
         // ================= ATA =================
         function gerarAta() {
-            const linhaId = c => `${c.nome} (ID ${c.id}) — ${idadeTexto(c.data_nasc) || 'idade não informada'}${idadeAnos(c.data_nasc) >= IDADE_IDOSO ? ' [IDOSO]' : ''}${c.prioritario ? ' [ACS CONSIDERA PRIORIDADE]' : ''}
+            const linhaId = c => `${c.nome} (ID ${c.id}) — ${idadeTexto(c.data_nasc) || 'idade não informada'}${idadeAnos(c.data_nasc) >= IDADE_IDOSO ? ' [IDOSO]' : ''}
    Nasc.: ${fmt(c.data_nasc)} | CPF/CNS: ${c.cpf || '—'} | Família: ${c.num_familia || '—'}
    ACS: ${acsNome(c.acs_responsavel)} | Trouxe: ${c.quem_traz || '—'} | Registrado em ${fmt(c.data_criacao)}
    Descrição: ${c.descricao}
@@ -2226,7 +2195,7 @@ Consultas: ${L.consulta().length} | VDs a realizar: ${L.vd().length} | Pendênci
                     linhas_cuidado: linhasDeTexto(g(r, 'linhas')),
                     descricao: String(g(r, 'descricao') ?? '').trim(),
                     sugestao_acs: lista(g(r, 'sugestao')).join(', '),
-                    prioritario: /^(sim|urgente|e urgente)/.test(normTxt(g(r, 'prioridade'))),
+                    prioritario: normTxt(g(r, 'prioridade')).startsWith('sim'),
                     data_criacao: dataDe(g(r, 'conclusao'), formato) || hoje()
                 };
                 const dup = casos.find(x => (c.forms_id && x.forms_id === c.forms_id) ||
@@ -2255,7 +2224,7 @@ Consultas: ${L.consulta().length} | VDs a realizar: ${L.vd().length} | Pendênci
                     ${lista.map((c, i) => `<label style="display:flex;gap:10px;align-items:flex-start;padding:9px 10px;border-bottom:1px solid #EDE9FE;font-weight:400;margin:0;cursor:${c._situacao === 'novo' ? 'pointer' : 'default'};background:${c._situacao === 'novo' ? 'white' : '#F9FAFB'};">
                         <input type="checkbox" class="imp-check" value="${i}" ${c._situacao === 'novo' ? 'checked' : 'disabled'} style="margin-top:3px;accent-color:#8B5CF6;">
                         <div style="flex:1;font-size:12.5px;">
-                            <b>${esc(c.nome) || '(sem nome)'}</b> ${c.data_nasc ? idadeBadge(c) : ''} ${c.prioritario ? '<span class="tag bad">🚩 ACS considera prioridade</span>' : ''}
+                            <b>${esc(c.nome) || '(sem nome)'}</b> ${c.data_nasc ? idadeBadge(c) : ''} ${c.prioritario ? '<span class="tag bad">🚩 Prioritário</span>' : ''}
                             ${c._situacao === 'duplicado' ? '<span class="tag info">já importado</span>' : ''}${c._situacao === 'incompleto' ? '<span class="tag bad">falta nome, ACS ou descrição</span>' : ''}
                             <div style="color:#6B7280;margin-top:3px;">🏠 ${esc(acsNome(c.acs_responsavel))} · 📅 ${fmt(c.data_criacao)} · 🗣️ ${esc(c.quem_traz) || '—'}${c.sugestao_acs ? ' · 💡 ' + esc(c.sugestao_acs) : ''}</div>
                             <div style="color:#374151;margin-top:3px;">${esc(c.descricao.slice(0, 160))}${c.descricao.length > 160 ? '…' : ''}</div>
