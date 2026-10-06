@@ -1181,6 +1181,7 @@
 
                 // Sincronizar com Firebase em tempo real
                 if (firebaseReady && db) {
+                    let primeiraVez = true;
                     const unsubscribe = db.collection('casos').onSnapshot((snapshot) => {
                         const firebaseCasos = [];
                         snapshot.forEach((doc) => {
@@ -1190,18 +1191,23 @@
                             });
                         });
 
-                        // Adicionar casos novos do Firebase
-                        if (firebaseCasos.length > 0) {
+                        if (primeiraVez) {
+                            // Primeira vez: carregar TODOS os casos do Firebase
+                            casos = firebaseCasos;
+                            primeiraVez = false;
+                        } else {
+                            // Depois: apenas adicionar casos novos
                             const idsExistentes = new Set(casos.map(c => c.id));
                             for (let caso of firebaseCasos) {
                                 if (!idsExistentes.has(caso.id)) {
                                     casos.push(caso);
                                 }
                             }
-                            localStorage.setItem('casos', JSON.stringify(casos));
-                            renderizar();
-                            console.log("✅ Sincronizado com Firebase!");
                         }
+
+                        localStorage.setItem('casos', JSON.stringify(casos));
+                        renderizar();
+                        console.log("✅ Sincronizado com Firebase!");
                     });
                 }
             } catch (e) { console.error('Erro ao carregar dados', e); }
