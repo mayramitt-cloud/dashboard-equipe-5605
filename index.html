@@ -802,9 +802,6 @@
             .ag-row { grid-template-columns: 1fr 1fr; }
         }
     </style>
-    <!-- Firebase Scripts (CDN Compatible) -->
-    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
 </head>
 <body>
     <div class="container">
@@ -1049,31 +1046,6 @@
         const IDADE_IDOSO = 60;
 
         let casos = [];
-
-        // ===== INICIALIZAÇÃO FIREBASE =====
-        const firebaseConfig = {
-          apiKey: "AIzaSyCvLYYNWrHpyTxHMKw34Oxf74dKutb8klM",
-          authDomain: "dashboard-equipe-5605.firebaseapp.com",
-          projectId: "dashboard-equipe-5605",
-          storageBucket: "dashboard-equipe-5605.firebasestorage.app",
-          messagingSenderId: "103365730281",
-          appId: "1:103365730281:web:6c4acbc88b3c81eb88f578",
-          measurementId: "G-WSVXXJBTSX"
-        };
-
-        let firebaseApp, db, firebaseReady = false;
-        
-        try {
-            firebaseApp = firebase.initializeApp(firebaseConfig);
-            db = firebase.firestore();
-            firebaseReady = true;
-            console.log("✅ Firebase inicializado com sucesso!");
-        } catch (e) {
-            console.warn("⚠️ Firebase falhou:", e.message);
-            firebaseReady = false;
-        }
-        // ===================================
-
         const F = {};                 // filtros por aba
         const resAbertos = new Set(); // linhas abertas em Resolvidos
 
@@ -1087,28 +1059,7 @@
         const acsNome = k => { const a = acsObj(k); return a ? `${a.nome} (Micro ${a.micro})` : (k || '—'); };
         const ordemMicro = k => acsObj(k)?.micro ?? 99;
         const getCaso = id => casos.find(c => c.id === id);
-        async function salvar() {
-            try {
-                // Salvar em localStorage (sempre)
-                localStorage.setItem('casos', JSON.stringify(casos));
-                
-                // Tentar salvar em Firebase (background)
-                if (firebaseReady && db) {
-                    try {
-                        await db.collection('dashboard').doc('casos').set({
-                            dados: casos,
-                            timestamp: new Date().toISOString()
-                        });
-                        console.log("✅ Dados salvos no Firebase");
-                    } catch (firebaseError) {
-                        console.warn("⚠️ Firebase save error:", firebaseError.message);
-                        // Continua funcionando com localStorage
-                    }
-                }
-            } catch (e) {
-                console.warn("❌ Erro ao salvar:", e);
-            }
-        }
+        function salvar() { try { localStorage.setItem('casos', JSON.stringify(casos)); } catch (e) { console.warn(e); } }
         function log(c, texto, data) { c.historico = c.historico || []; c.historico.push({ data: data || hoje(), texto }); }
         function toast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.style.display = 'block'; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 2600); }
 
@@ -1176,15 +1127,36 @@
             return c;
         }
 
-        async function carregar() {
-                try {
-                // Carregar dados do localStorage primeiro
-                const localData = localStorage.getItem('casos');
-                if (localData) {
-                    casos = JSON.parse(localData);
+        function carregar() {
+            try {
+                const raw = localStorage.getItem('casos');
+                if (raw) casos = JSON.parse(raw) || [];
+                const rawVds = localStorage.getItem('vds');
+                // backup de segurança antes da migração (só na primeira vez)
+                if (raw && !localStorage.getItem('backup_v12_casos')) localStorage.setItem('backup_v12_casos', raw);
+                if (rawVds && !localStorage.getItem('backup_v12_vds')) localStorage.setItem('backup_v12_vds', rawVds);
+                casos.forEach(migrarCaso);
+                // VDs antigas (lista separada) passam a ficar dentro do caso
+                if (rawVds) {
+                    const vdsAntigas = JSON.parse(rawVds) || [];
+                    vdsAntigas.forEach(v => {
+                        let c = casos.find(x => x.status === 'pendente' && x.nome && v.paciente && x.nome.trim().toLowerCase() === v.paciente.trim().toLowerCase() && !x.destinos.vd);
+                        if (!c) {
+                            c = migrarCaso({
+                                id: proximoId(), nome: v.paciente, num_familia: '', cpf: '', data_nasc: '',
+                                descricao: v.motivo || 'VD avulsa', desfecho: '', linhas_cuidado: [], status: 'pendente',
+                                acs_responsavel: v.acs, quem_traz: '', data_criacao: v.data_solicitacao || hoje()
+                            });
+                            casos.push(c);
+                        }
+                        c.destinos.vd = { solicitado_em: v.data_solicitacao || hoje(), solicitado_por: '', data_prevista: v.data || '', motivo: v.motivo || '', realizada: false };
+                        log(c, 'VD agendada', v.data_solicitacao);
+                    });
+                    localStorage.removeItem('vds');
                 }
-                
-                // Depois sincronizar com Firebase em tempo real
+                salvar();
+
+                // Sincronizar com Firebase em tempo real
                 if (firebaseReady && db) {
                     const unsubscribe = db.collection('casos').onSnapshot((snapshot) => {
                         const firebaseCasos = [];
@@ -1194,7 +1166,7 @@
                                 ...doc.data()
                             });
                         });
-                        
+
                         // Adicionar casos novos do Firebase
                         if (firebaseCasos.length > 0) {
                             const idsExistentes = new Set(casos.map(c => c.id));
@@ -1209,12 +1181,587 @@
                         }
                     });
                 }
-                
-                // Renderizar dados locais
-                renderizar();
-        } catch(e) { console.error(e); }
+            } catch (e) { console.error('Erro ao carregar dados', e); }
+        }
+        const proximoId = () => casos.reduce((m, c) => Math.max(m, Number(c.id) || 0), 322) + 1;
+
+        // ================= INICIALIZAÇÃO =================
+        function montarFormulario() {
+            document.getElementById('acs_responsavel').innerHTML = acsOptions('');
+            document.getElementById('quem_traz').innerHTML = profOptions('', [...PROFISSIONAIS, 'outro']).replace('>outro<', '>Outro profissional<');
+            document.getElementById('quem_traz').addEventListener('change', function () {
+                document.getElementById('outro-prof-group').style.display = this.value === 'outro' ? 'flex' : 'none';
+            });
+            document.getElementById('linhas-form').innerHTML = LINHAS.map(l => `<label class="checkbox-item"><input type="checkbox" value="${l}" class="linha-cuidado"> ${l}</label>`).join('');
+            document.getElementById('data').value = hoje();
+            document.getElementById('data-reuniao').value = hoje();
         }
 
+        function montarFiltros() {
+            const acs = { key: 'acs', label: 'ACS', opts: [['', '🔓 Todas'], ...ACS.map(a => [a.k, `${a.nome} (Micro ${a.micro})`])] };
+            const solic = { key: 'solic', label: 'Solicitado por', opts: [['', '🔓 Todos'], ...PROFISSIONAIS.map(p => [p, p])] };
+            const busca = { key: 'busca', label: '🔎', busca: true };
+            const defs = {
+                pendentes: [acs,
+                    { key: 'prio', label: 'Prioridade', opts: [['', '🔓 Todos'], ['sim', '🚩 Só os que a ACS considera prioridade']] },
+                    { key: 'origem', label: 'Origem', opts: [['', '🔓 Todas'], ['forms', '📨 Formulário das ACS'], ['manual', '✍️ Registrado no dashboard']] },
+                    busca],
+                resolvidos: [acs,
+                    { key: 'destino', label: 'Resolvidos de', opts: [['', '🔓 Todos'], ['multi', '👥 Equipe Multi'], ['rede', '🏥 Rede'], ['vd', '📍 Visita Domiciliar'], ['consulta', '🩺 Consulta'], ['direto', '✔️ Resolvido direto (sem destino)']] },
+                    { periodo: true, label: '📅 Resolvido entre' },
+                    busca],
+                multi: [acs,
+                    { key: 'esp', label: 'Especialidade', opts: [['', '🔓 Todas'], ...ESPECIALIDADES.map(e => [e, e])] },
+                    { key: 'disc', label: 'Discussão', opts: [['', '🔓 Todos'], ['nao', '❓ Ainda não discutidos'], ['sim', '✅ Já discutidos']] },
+                    solic, busca],
+                rede: [acs,
+                    { key: 'serv', label: 'Serviço', opts: [['', '🔓 Todos'], ...SERVICOS_REDE.map(e => [e, e])] },
+                    { key: 'disc', label: 'Discussão', opts: [['', '🔓 Todos'], ['nao', '❓ Ainda não discutidos'], ['sim', '✅ Já discutidos']] },
+                    solic, busca],
+                consulta: [acs,
+                    { key: 'ag', label: 'Agendamento', opts: [['', '🔓 Todos'], ['pendente', '⏳ Pendente de agendar'], ['agendado', '✅ Já agendado']] },
+                    { key: 'comp', label: 'Comparecimento', opts: [['', '🔓 Todos'], ['aguardando', '⌛ Aguardando'], ['compareceu', '✅ Compareceu'], ['faltou', '❌ Faltou']] },
+                    solic, busca],
+                vd: [
+                    { key: 'visao', label: 'Ver como', def: 'agenda', opts: [['agenda', '📅 Agenda por data'], ['acs', '👤 Cartões por ACS']] },
+                    { key: 'rapido', label: 'Quando', opts: [['', '🔓 Todas as datas'], ['atrasadas', '⚠️ Atrasadas'], ['hoje', '📌 Hoje'], ['semana', '🗓️ Esta semana'], ['prox7', '⏩ Próximos 7 dias'], ['mes', '📆 Este mês'], ['semdata', '❔ Sem data definida']] },
+                    { periodo: true, label: '📅 Data da VD' },
+                    acs, solic, busca],
+                pendvd: [acs,
+                    { key: 'sit', label: 'Situação', def: 'pendentes', opts: [['pendentes', '⏳ Com pendências'], ['concluidas', '✅ Concluídas'], ['', '🔓 Todas']] },
+                    { periodo: true, label: '📅 VD realizada entre' },
+                    busca]
+            };
+            Object.entries(defs).forEach(([tab, lista]) => {
+                F[tab] = {};
+                document.getElementById('f-' + tab).innerHTML = lista.map(d => {
+                    if (d.periodo) {
+                        F[tab].de = ''; F[tab].ate = '';
+                        return `<div class="f periodo"><label>${d.label}:</label><input type="date" data-k="de" onchange="setFiltro('${tab}','de',this.value)"><label>até</label><input type="date" data-k="ate" onchange="setFiltro('${tab}','ate',this.value)"><button class="btn-secondary" style="padding:6px 10px;" onclick="limparDatas('${tab}')" title="Limpar datas">✖</button></div>`;
+                    }
+                    F[tab][d.key] = d.def || '';
+                    if (d.busca) return `<div class="f"><label>${d.label}</label><input type="search" placeholder="Buscar paciente..." oninput="setFiltro('${tab}','${d.key}',this.value)"></div>`;
+                    return `<div class="f"><label>${d.label}:</label><select onchange="setFiltro('${tab}','${d.key}',this.value)">${d.opts.map(([v, t]) => `<option value="${esc(v)}" ${v === (d.def || '') ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>`;
+                }).join('');
+            });
+        }
+        function setFiltro(tab, key, val) { F[tab][key] = val; renderizar(); }
+        function limparDatas(tab) {
+            document.querySelectorAll(`#f-${tab} .periodo input`).forEach(i => i.value = '');
+            F[tab].de = ''; F[tab].ate = ''; renderizar();
+        }
+        function filtrarPeriodo(lista, tab, getData) {
+            const { de, ate } = F[tab];
+            if (!de && !ate) return lista;
+            return lista.filter(c => { const d = getData(c); return d && (!de || d >= de) && (!ate || d <= ate); });
+        }
+        function addDias(iso, n) { const d = new Date(iso + 'T00:00:00'); d.setDate(d.getDate() + n); return isoLocal(d); }
+        const DIAS_SEMANA = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'];
+        const diaSemana = iso => DIAS_SEMANA[new Date(iso + 'T00:00:00').getDay()];
+
+        function aplicarFiltrosBase(lista, tab) {
+            const f = F[tab] || {};
+            if (f.acs) lista = lista.filter(c => c.acs_responsavel === f.acs);
+            if (f.prio) lista = lista.filter(c => c.prioritario);
+            if (f.origem) lista = lista.filter(c => (c.origem === 'forms') === (f.origem === 'forms'));
+            if (f.busca) { const q = f.busca.toLowerCase(); lista = lista.filter(c => (c.nome || '').toLowerCase().includes(q) || (c.cpf || '').includes(q)); }
+            return lista;
+        }
+
+        window.addEventListener('DOMContentLoaded', () => {
+            montarFormulario();
+            montarFiltros();
+            carregar();
+            renderizar();
+            statusBackup();
+        });
+
+        // ================= NOVO CASO =================
+        function adicionarCaso() {
+            const v = id => document.getElementById(id).value.trim();
+            const msg = document.getElementById('formMessage');
+            const linhas = [...document.querySelectorAll('.linha-cuidado:checked')].map(el => el.value);
+            let quem = v('quem_traz');
+            if (!v('nome') || !v('descricao') || !linhas.length || !v('acs_responsavel') || !quem) {
+                showMessage(msg, '❌ Preencha todos os campos obrigatórios (*)', 'error');
+                return;
+            }
+            if (quem === 'outro') quem = v('outro_prof') || 'Outro';
+            const data = v('data') || hoje();
+            const c = {
+                id: proximoId(), nome: v('nome'), num_familia: v('num_familia'), cpf: v('cpf'), data_nasc: v('data_nasc'),
+                descricao: v('descricao'), desfecho: v('desfecho'), linhas_cuidado: linhas, status: 'pendente',
+                acs_responsavel: v('acs_responsavel'), quem_traz: quem, data_criacao: data, destinos: {},
+                prioritario: document.getElementById('btn-prio-form').classList.contains('on'),
+                historico: [{ data, texto: `Caso registrado — trazido por ${quem}` }]
+            };
+            if (c.prioritario) log(c, '🚩 ACS considera prioridade', data);
+            casos.push(c);
+            salvar();
+            renderizar();
+            showMessage(msg, `✅ Caso de ${c.nome} adicionado em Pendentes!`, 'success');
+            limparForm(true);
+            setTimeout(() => switchTab('pendentes'), 900);
+        }
+
+        function limparForm(manterMsg) {
+            ['nome', 'descricao', 'desfecho', 'num_familia', 'cpf', 'data_nasc', 'acs_responsavel', 'quem_traz', 'outro_prof'].forEach(id => document.getElementById(id).value = '');
+            document.getElementById('outro-prof-group').style.display = 'none';
+            document.querySelectorAll('.linha-cuidado').forEach(el => el.checked = false);
+            const bp = document.getElementById('btn-prio-form'); bp.classList.remove('on'); bp.textContent = '🚩 ACS considera prioridade';
+            document.getElementById('data').value = hoje();
+            previewIdade();
+            if (!manterMsg) document.getElementById('formMessage').style.display = 'none';
+        }
+
+        // ================= NAVEGAÇÃO =================
+        function switchTab(tabName) {
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-button').forEach(b => b.classList.remove('active'));
+            document.getElementById(tabName).classList.add('active');
+            const btn = document.querySelector(`.tab-button[onclick*="'${tabName}'"]`);
+            if (btn) btn.classList.add('active');
+            if (tabName === 'resumo') atualizarResumo();
+        }
+        function destacar(tab, id) {
+            setTimeout(() => {
+                const el = document.getElementById(`card-${tab}-${id}`);
+                if (!el) return;
+                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                el.style.boxShadow = '0 0 0 5px #F59E0B';
+                setTimeout(() => el.style.boxShadow = '', 1800);
+            }, 80);
+        }
+
+        // ================= LISTAS POR ABA =================
+        const L = {
+            pendentes: () => casos.filter(c => c.status === 'pendente' && ativos(c).length === 0),
+            multi:     () => casos.filter(c => c.status === 'pendente' && c.destinos.multi),
+            rede:      () => casos.filter(c => c.status === 'pendente' && c.destinos.rede),
+            consulta:  () => casos.filter(c => c.status === 'pendente' && c.destinos.consulta),
+            vd:        () => casos.filter(c => c.status === 'pendente' && c.destinos.vd && !c.destinos.vd.realizada),
+            pendvd:    () => casos.filter(c => c.status === 'pendente' && c.destinos.vd && c.destinos.vd.realizada),
+            resolvidos:() => casos.filter(c => c.status === 'resolvido')
+        };
+        const pendVDConcluida = vd => !!(vd.documentos_entregues && vd.consulta_registrada);
+
+        function renderizar() {
+            renderMetricas();
+            renderGrupo('pendentes', aplicarFiltrosBase(L.pendentes(), 'pendentes'), '📭', 'Nenhum caso pendente');
+            renderGraficos(L.pendentes(), 'grafico-acs-pendentes', 'grafico-linhas-pendentes');
+            renderMulti(); renderRede(); renderConsulta(); renderVD(); renderPendVD(); renderResolvidos();
+            if (document.getElementById('resumo').classList.contains('active')) atualizarResumo();
+        }
+
+        function renderMetricas() {
+            const itens = [
+                ['pendentes', 'Pendentes', L.pendentes().length],
+                ['multi', 'Equipe Multi', L.multi().length],
+                ['rede', 'Rede', L.rede().length],
+                ['consulta', 'Consultas', L.consulta().length],
+                ['vd', 'VDs a realizar', L.vd().length],
+                ['pendvd', 'Pendências VD', L.pendvd().filter(c => !pendVDConcluida(c.destinos.vd)).length],
+                ['resolvidos', 'Resolvidos', L.resolvidos().length],
+                ['', 'Total', casos.length]
+            ];
+            document.getElementById('metrics').innerHTML = itens.map(([tab, l, n]) =>
+                `<div class="metric" ${tab ? `onclick="switchTab('${tab}')"` : ''}><div class="metric-value">${n}</div><div class="metric-label">${l}</div></div>`).join('');
+        }
+
+        function renderGrupo(tab, lista, icone, vazio, ctx = tab) {
+            const cont = document.getElementById(tab + '-content');
+            if (!lista.length) { cont.innerHTML = `<div class="empty-state"><div class="empty-state-icon">${icone}</div><p>${vazio}</p></div>`; return; }
+            const porACS = {};
+            lista.forEach(c => (porACS[c.acs_responsavel] = porACS[c.acs_responsavel] || []).push(c));
+            cont.innerHTML = Object.keys(porACS).sort((a, b) => ordemMicro(a) - ordemMicro(b)).map(acs => {
+                const itens = porACS[acs].sort((a, b) => (!!b.prioritario - !!a.prioritario) || (dataRef(a, ctx) || '').localeCompare(dataRef(b, ctx) || ''));
+                return `<div class="section-divider"><div class="section-title">👤 ${esc(acsNome(acs))} (${itens.length})</div>${itens.map(c => card(c, ctx)).join('')}</div>`;
+            }).join('');
+        }
+        function dataRef(c, ctx) {
+            if (ctx === 'vd') return c.destinos.vd?.data_prevista || c.destinos.vd?.solicitado_em;
+            if (ctx === 'pendvd') return c.destinos.vd?.data_realizada;
+            if (ctx === 'consulta') return c.destinos.consulta?.data_agendada || c.destinos.consulta?.solicitado_em;
+            if (DESTINOS[ctx]) return c.destinos[ctx]?.solicitado_em;
+            return c.data_criacao;
+        }
+
+        // ================= CARD =================
+        function idStrip(c) {
+            return `<div class="id-strip">
+                <span class="chip">🎂 Nasc.: <b>${fmt(c.data_nasc)}</b></span>
+                <span class="chip">🪪 CPF/CNS: <b>${esc(c.cpf) || '—'}</b></span>
+                <span class="chip">👨‍👩‍👧 Família: <b>${esc(c.num_familia) || '—'}</b></span>
+                <span class="chip">🏠 ACS: <b>${esc(acsNome(c.acs_responsavel))}</b></span>
+                <span class="chip">🗣️ Trouxe o caso: <b>${esc(c.quem_traz) || '—'}</b></span>
+                <span class="chip">📅 Registrado em: <b>${fmt(c.data_criacao)}</b></span>
+                ${c.linhas_cuidado.length ? `<span class="chip">📋 ${esc(c.linhas_cuidado.join(', '))}</span>` : ''}
+                ${c.origem === 'forms' ? `<span class="chip">📨 Veio pelo formulário</span>` : ''}
+                ${c.sugestao_acs ? `<span class="chip" style="background:#FFFBEB;border-color:#FCD34D;">💡 ACS sugere: <b>${esc(c.sugestao_acs)}</b></span>` : ''}
+            </div>`;
+        }
+        function tagsDestinos(c, exceto) {
+            return ativos(c).filter(k => k !== exceto).map(k => `<span class="tag info" title="Também em ${DESTINOS[k].nome}">${DESTINOS[k].icone} ${DESTINOS[k].nome}</span>`).join('');
+        }
+        function solStrip(c, k) {
+            const d = c.destinos[k];
+            return `<div class="sol-strip">
+                <span>📌 <b>Solicitado em</b> <input type="date" value="${esc(d.solicitado_em)}" onchange="setDestino(${c.id},'${k}','solicitado_em',this.value)"></span>
+                <span><b>por</b> <select onchange="setDestino(${c.id},'${k}','solicitado_por',this.value)">${profOptions(d.solicitado_por, PROFISSIONAIS, '— não informado —')}</select></span>
+                <span>🏠 <b>ACS:</b> ${esc(acsNome(c.acs_responsavel))}</span>
+            </div>`;
+        }
+        function blocoTexto(c) {
+            return `<div class="bloco"><strong>Descrição:</strong>
+                    <textarea onchange="setCampo(${c.id},'descricao',this.value)">${esc(c.descricao)}</textarea></div>
+                <div class="bloco"><strong>Conduta:</strong>
+                    <textarea onchange="setCampo(${c.id},'desfecho',this.value)">${esc(c.desfecho)}</textarea></div>`;
+        }
+
+        function card(c, ctx) {
+            let corpo = '', especificos = '';
+            if (ctx === 'pendentes') {
+                corpo = blocoTexto(c);
+            } else if (ctx === 'multi') {
+                const d = c.destinos.multi;
+                corpo = solStrip(c, 'multi') + `<div class="bloco"><strong>Discussão com Equipe Multi:</strong>
+                    ${(d.encaminhamentos || []).map(e => `<div style="margin-top:6px;"><span class="tag info">${esc(e.tipo)}</span> ${esc(e.justificativa)}</div>`).join('') || '<div style="color:#999">Nenhuma especialidade marcada</div>'}
+                    <div style="margin-top:8px;">${d.discutido ? `<span class="tag ok">✅ Discutido${d.data_discussao ? ' em ' + fmt(d.data_discussao) : ''}</span>` : '<span class="tag warn">❓ Não discutido</span>'}</div></div>` + blocoTexto(c);
+                especificos = `<button class="btn-multi" onclick="abrirDestino(${c.id},'multi')">✏️ Editar especialidades</button>
+                    <button class="btn-warning" onclick="toggleDiscutido(${c.id},'multi')">💬 ${d.discutido ? 'Desmarcar discussão' : 'Marcar como discutido'}</button>`;
+            } else if (ctx === 'rede') {
+                const d = c.destinos.rede;
+                corpo = solStrip(c, 'rede') + `<div class="bloco"><strong>Serviços da Rede:</strong>
+                    <div style="margin-top:6px;">${(d.servicos || []).map(s => `<span class="tag info">🏥 ${esc(s)}</span>`).join('')}</div>
+                    ${d.obs ? `<div style="margin-top:6px;">${esc(d.obs)}</div>` : ''}
+                    <div style="margin-top:8px;">${d.discutido ? `<span class="tag ok">✅ Discutido${d.data_discussao ? ' em ' + fmt(d.data_discussao) : ''}</span>` : '<span class="tag warn">❓ Não discutido</span>'}</div></div>` + blocoTexto(c);
+                especificos = `<button class="btn-multi" onclick="abrirDestino(${c.id},'rede')">✏️ Editar serviços</button>
+                    <button class="btn-warning" onclick="toggleDiscutido(${c.id},'rede')">💬 ${d.discutido ? 'Desmarcar discussão' : 'Marcar como discutido'}</button>`;
+            } else if (ctx === 'vd') {
+                const d = c.destinos.vd;
+                corpo = solStrip(c, 'vd') + `<div class="bloco"><div class="grid-campos">
+                    <div class="cmp"><label>📅 Data prevista da VD</label><input type="date" class="inline-edit" value="${esc(d.data_prevista)}" onchange="setDestino(${c.id},'vd','data_prevista',this.value,true)"></div>
+                    </div>
+                    <div style="margin-top:8px;"><strong>Motivo / objetivo da VD:</strong><textarea onchange="setDestino(${c.id},'vd','motivo',this.value)">${esc(d.motivo)}</textarea></div></div>` + blocoTexto(c);
+                especificos = `<button class="btn-resolve" onclick="marcarVDRealizada(${c.id})">✅ VD realizada</button>`;
+            } else if (ctx === 'pendvd') {
+                const d = c.destinos.vd, ok = pendVDConcluida(d);
+                corpo = solStrip(c, 'vd') + `<div class="bloco"><div class="grid-campos">
+                    <div class="cmp"><label>🏠 VD realizada em</label><input type="date" class="inline-edit" value="${esc(d.data_realizada)}" onchange="setDestino(${c.id},'vd','data_realizada',this.value,true)"></div>
+                    <div class="cmp"><label>📄 Documentos entregues</label><div>${d.documentos_entregues ? `<span class="tag ok">✅ Entregues em ${fmt(d.data_documentos)}</span>` : '<span class="tag warn">⏳ Pendente</span>'}</div></div>
+                    <div class="cmp"><label>💻 Consulta registrada no sistema</label><div>${d.consulta_registrada ? `<span class="tag ok">✅ Registrada em ${fmt(d.data_registro)}</span>` : '<span class="tag warn">⏳ Pendente</span>'}</div></div>
+                    <div class="cmp"><label>Situação</label><div>${ok ? '<span class="tag ok">✅ Atendimento concluído</span>' : '<span class="tag bad">⏳ Com pendências</span>'}</div></div>
+                    </div>
+                    <div style="margin-top:8px;"><strong>📝 O que falta fazer (exames, receitas, laudos...):</strong><textarea placeholder="Ex.: pedir hemograma, renovar receita de losartana, laudo para INSS" onchange="setDestino(${c.id},'vd','tarefas',this.value)">${esc(d.tarefas)}</textarea></div>
+                    ${d.motivo ? `<div style="margin-top:6px;color:#6B7280;"><b>Motivo da VD:</b> ${esc(d.motivo)}</div>` : ''}</div>` + blocoTexto(c);
+                especificos = `<button class="btn-toggle ${d.documentos_entregues ? 'on' : ''}" onclick="toggleVD(${c.id},'documentos_entregues','data_documentos','Documentos entregues (exames, receitas, laudos)')">📄 Documentos entregues ${d.documentos_entregues ? '✓' : ''}</button>
+                    <button class="btn-toggle ${d.consulta_registrada ? 'on' : ''}" onclick="toggleVD(${c.id},'consulta_registrada','data_registro','Consulta finalizada e registrada no sistema')">💻 Consulta finalizada e registrada ${d.consulta_registrada ? '✓' : ''}</button>
+                    <button class="btn-secondary" onclick="desfazerVDRealizada(${c.id})">↩️ VD não realizada</button>`;
+            } else if (ctx === 'consulta') {
+                const d = c.destinos.consulta;
+                const faltasAnt = (d.tentativas || []).filter(t => t.comparecimento === 'faltou').length;
+                corpo = solStrip(c, 'consulta') + `<div class="bloco"><div class="grid-campos">
+                    <div class="cmp"><label>👩‍⚕️ Consulta com</label><select class="inline-edit" onchange="setDestino(${c.id},'consulta','com_quem',this.value)">${profOptions(d.com_quem, PROF_CONSULTA)}</select></div>
+                    <div class="cmp"><label>📞 Agendamento</label><select class="inline-edit" onchange="setDestino(${c.id},'consulta','agendamento',this.value,true)">
+                        <option value="pendente" ${d.agendamento !== 'agendado' ? 'selected' : ''}>⏳ Pendente de agendar</option>
+                        <option value="agendado" ${d.agendamento === 'agendado' ? 'selected' : ''}>✅ Agendado</option></select></div>
+                    <div class="cmp"><label>📅 Data agendada</label><input type="date" class="inline-edit" value="${esc(d.data_agendada)}" onchange="setDestino(${c.id},'consulta','data_agendada',this.value,true)"></div>
+                    <div class="cmp"><label>🙋 Compareceu?</label><select class="inline-edit" ${d.agendamento !== 'agendado' ? 'disabled title="Marque como agendado primeiro"' : ''} onchange="setDestino(${c.id},'consulta','comparecimento',this.value,true)">
+                        <option value="" ${!d.comparecimento ? 'selected' : ''}>⌛ Aguardando a data</option>
+                        <option value="compareceu" ${d.comparecimento === 'compareceu' ? 'selected' : ''}>✅ Compareceu</option>
+                        <option value="faltou" ${d.comparecimento === 'faltou' ? 'selected' : ''}>❌ Faltou</option></select></div>
+                    </div>
+                    <div style="margin-top:8px;">${d.agendamento === 'agendado' ? '<span class="tag ok">✅ Agendado</span>' : '<span class="tag warn">⏳ Pendente de agendar</span>'}
+                        ${d.comparecimento === 'compareceu' ? '<span class="tag ok">✅ Compareceu</span>' : ''}${d.comparecimento === 'faltou' ? '<span class="tag bad">❌ Faltou</span>' : ''}
+                        ${faltasAnt ? `<span class="tag bad">${faltasAnt} falta(s) anterior(es): ${(d.tentativas || []).filter(t => t.comparecimento === 'faltou').map(t => fmt(t.data_agendada)).join(', ')}</span>` : ''}</div>
+                    <div style="margin-top:8px;"><strong>Motivo da consulta:</strong><textarea onchange="setDestino(${c.id},'consulta','motivo',this.value)">${esc(d.motivo)}</textarea></div></div>` + blocoTexto(c);
+                especificos = d.comparecimento === 'faltou' ? `<button class="btn-warning" onclick="reagendarConsulta(${c.id})">🔁 Reagendar (registra a falta)</button>` : '';
+            }
+
+            let acoes;
+            if (ctx === 'pendentes') {
+                acoes = `<div class="acoes-destino"><span class="rotulo">Dar destino ao caso:</span>
+                    ${Object.entries(DESTINOS).map(([k, d]) => `<button class="btn-primary" onclick="abrirDestino(${c.id},'${k}')">${d.icone} ${d.botao}</button>`).join('')}</div>
+                    <div class="case-actions">
+                        <button class="btn-prio ${c.prioritario ? 'on' : ''}" onclick="togglePrioridade(${c.id})">🚩 ACS considera prioridade${c.prioritario ? ' ✓' : ''}</button>
+                        <button class="btn-secondary" onclick="abrirEdicao(${c.id})">✏️ Editar dados</button>
+                        <button class="btn-resolve" onclick="marcarResolvido(${c.id})">✅ Resolvido</button>
+                        <button class="btn-danger" onclick="deletarCaso(${c.id})">🗑️ Remover</button></div>`;
+            } else {
+                const k = ctx === 'pendvd' ? 'vd' : ctx;
+                const outros = Object.entries(DESTINOS).filter(([dk]) => !c.destinos[dk]);
+                acoes = `<div class="case-actions">${especificos}</div>
+                    ${outros.length ? `<div class="acoes-destino"><span class="rotulo">Encaminhar também para:</span>${outros.map(([dk, d]) => `<button class="btn-multi" style="font-size:11px;padding:6px 10px;" onclick="abrirDestino(${c.id},'${dk}')">${d.icone} ${d.botao}</button>`).join('')}</div>` : ''}
+                    <div class="case-actions">
+                        <button class="btn-secondary" onclick="abrirEdicao(${c.id})">✏️ Editar dados</button>
+                        <button class="btn-secondary" onclick="removerDestino(${c.id},'${k}')">↩️ Tirar desta aba</button>
+                        <button class="btn-resolve" onclick="marcarResolvido(${c.id})">✅ Caso resolvido</button>
+                        <button class="btn-danger" onclick="deletarCaso(${c.id})">🗑️ Remover</button></div>`;
+            }
+
+            return `<div class="case-card ${c.prioritario ? 'card-prio' : ''}" id="card-${ctx}-${c.id}">
+                <div class="case-header">
+                    <div><div class="case-name">👤 ${esc(c.nome)} ${idadeBadge(c)} ${c.prioritario ? `<span class="tag bad">🚩 ACS considera prioridade</span>` : ''}</div></div>
+                    <div style="text-align:right;">${tagsDestinos(c, ctx === 'pendvd' ? 'vd' : ctx)}<span class="case-id">ID: ${c.id}</span></div>
+                </div>
+                ${idStrip(c)}
+                ${corpo}
+                ${acoes}
+            </div>`;
+        }
+
+        // ================= RENDER POR ABA =================
+        function renderMulti() {
+            let l = aplicarFiltrosBase(L.multi(), 'multi'); const f = F.multi;
+            if (f.esp) l = l.filter(c => (c.destinos.multi.encaminhamentos || []).some(e => e.tipo === f.esp));
+            if (f.disc) l = l.filter(c => !!c.destinos.multi.discutido === (f.disc === 'sim'));
+            if (f.solic) l = l.filter(c => c.destinos.multi.solicitado_por === f.solic);
+            renderGrupo('multi', l, '👥', 'Nenhum caso para Equipe Multi');
+        }
+        function renderRede() {
+            let l = aplicarFiltrosBase(L.rede(), 'rede'); const f = F.rede;
+            if (f.serv) l = l.filter(c => (c.destinos.rede.servicos || []).includes(f.serv));
+            if (f.disc) l = l.filter(c => !!c.destinos.rede.discutido === (f.disc === 'sim'));
+            if (f.solic) l = l.filter(c => c.destinos.rede.solicitado_por === f.solic);
+            renderGrupo('rede', l, '🏥', 'Nenhum caso para discutir com a Rede');
+        }
+        function statsConsultas(lista) {
+            let faltas = 0, compareceu = 0;
+            lista.forEach(c => {
+                const d = c.destinos.consulta;
+                (d.tentativas || []).forEach(t => { if (t.comparecimento === 'faltou') faltas++; });
+                if (d.comparecimento === 'faltou') faltas++;
+                if (d.comparecimento === 'compareceu') compareceu++;
+            });
+            return { faltas, compareceu, taxa: (faltas + compareceu) ? Math.round(100 * faltas / (faltas + compareceu)) : 0 };
+        }
+        function renderConsulta() {
+            // estatísticas consideram TODAS as solicitações de consulta (inclusive casos já resolvidos)
+            const todas = casos.filter(c => c.destinos && c.destinos.consulta);
+            const s = statsConsultas(todas);
+            document.getElementById('consulta-stats').innerHTML = [
+                ['Solicitadas', todas.length], ['Pendentes de agendar', todas.filter(c => c.destinos.consulta.agendamento !== 'agendado').length],
+                ['Agendadas', todas.filter(c => c.destinos.consulta.agendamento === 'agendado').length],
+                ['Compareceram', s.compareceu], ['Faltas', s.faltas, 'bad'], ['Taxa de faltas', s.taxa + '%', 'bad']
+            ].map(([l, n, cl]) => `<div class="stat ${cl || ''}"><div class="n">${n}</div><div class="l">${l}</div></div>`).join('');
+
+            let l = aplicarFiltrosBase(L.consulta(), 'consulta'); const f = F.consulta;
+            if (f.ag) l = l.filter(c => (c.destinos.consulta.agendamento === 'agendado' ? 'agendado' : 'pendente') === f.ag);
+            if (f.comp) l = l.filter(c => (c.destinos.consulta.comparecimento || 'aguardando') === f.comp);
+            if (f.solic) l = l.filter(c => c.destinos.consulta.solicitado_por === f.solic);
+            renderGrupo('consulta', l, '🩺', 'Nenhuma consulta para agendar');
+        }
+        function renderVD() {
+            let l = aplicarFiltrosBase(L.vd(), 'vd');
+            if (F.vd.solic) l = l.filter(c => c.destinos.vd.solicitado_por === F.vd.solic);
+            const dp = c => c.destinos.vd.data_prevista || '';
+            const h = hoje();
+            const r = F.vd.rapido;
+            if (r === 'atrasadas') l = l.filter(c => dp(c) && dp(c) < h);
+            else if (r === 'hoje') l = l.filter(c => dp(c) === h);
+            else if (r === 'semana') { const [i, f] = obterPeriodo(h, 'semanal'); l = l.filter(c => dp(c) >= i && dp(c) <= f); }
+            else if (r === 'prox7') { const f = addDias(h, 6); l = l.filter(c => dp(c) >= h && dp(c) <= f); }
+            else if (r === 'mes') { const [i, f] = obterPeriodo(h, 'mensal'); l = l.filter(c => dp(c) >= i && dp(c) <= f); }
+            else if (r === 'semdata') l = l.filter(c => !dp(c));
+            l = filtrarPeriodo(l, 'vd', dp);
+            const todas = L.vd();
+            document.getElementById('vd-stats').innerHTML = [
+                ['A realizar', todas.length],
+                ['Atrasadas', todas.filter(c => dp(c) && dp(c) < h).length, 'bad'],
+                ['Hoje', todas.filter(c => dp(c) === h).length],
+                ['Próximos 7 dias', todas.filter(c => dp(c) >= h && dp(c) <= addDias(h, 6)).length],
+                ['Sem data', todas.filter(c => !dp(c)).length, 'bad']
+            ].map(([lb, n, cl]) => `<div class="stat ${cl || ''}" style="cursor:pointer" onclick="setFiltroUI('vd','rapido','${{'A realizar': '', 'Atrasadas': 'atrasadas', 'Hoje': 'hoje', 'Próximos 7 dias': 'prox7', 'Sem data': 'semdata'}[lb]}')"><div class="n">${n}</div><div class="l">${lb}</div></div>`).join('');
+            if (F.vd.visao === 'acs') renderGrupo('vd', l, '📍', 'Nenhuma VD a realizar neste filtro');
+            else renderAgendaVD(l);
+            // heatmap por microárea
+            const cont = {};
+            casos.filter(c => c.destinos && c.destinos.vd).forEach(c => cont[c.acs_responsavel] = (cont[c.acs_responsavel] || 0) + 1);
+            const max = Math.max(1, ...Object.values(cont));
+            document.getElementById('heatmap-microareas').innerHTML = ACS.map(a => {
+                const n = cont[a.k] || 0;
+                const cls = n === 0 ? 'intensity-low' : n >= max * 0.75 ? 'intensity-high' : n >= max * 0.4 ? 'intensity-medium' : 'intensity-low';
+                return `<div class="heatmap-item ${cls}" onclick="setFiltroUI('vd','acs','${a.k}')" title="Filtrar por ${a.nome}">
+                    <div class="heatmap-value">${n}</div><div class="heatmap-label">Micro ${a.micro} · ${a.nome.split(' ')[0]}${n === 0 ? '<br>⚠️ sem VDs' : ''}</div></div>`;
+            }).join('');
+        }
+        const vdAbertas = new Set();
+        function renderAgendaVD(l) {
+            const cont = document.getElementById('vd-content');
+            if (!l.length) { cont.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📍</div><p>Nenhuma VD a realizar neste filtro</p></div>'; return; }
+            const h = hoje(), grupos = {};
+            l.forEach(c => {
+                const d = c.destinos.vd.data_prevista || '';
+                const g = !d ? 'zz-semdata' : d < h ? '00-atrasadas' : d;
+                (grupos[g] = grupos[g] || []).push(c);
+            });
+            cont.innerHTML = Object.keys(grupos).sort().map(g => {
+                const itens = grupos[g].sort((a, b) => (a.destinos.vd.data_prevista || '').localeCompare(b.destinos.vd.data_prevista || '') || ordemMicro(a.acs_responsavel) - ordemMicro(b.acs_responsavel));
+                const titulo = g === '00-atrasadas' ? `<span style="color:#DC2626">⚠️ Atrasadas — data já passou</span>`
+                    : g === 'zz-semdata' ? '❔ Sem data definida'
+                    : `📅 ${diaSemana(g)}, ${fmt(g)}${g === h ? ' — <span class="tag ok">HOJE</span>' : ''}`;
+                return `<div class="section-divider" style="margin-top:18px;padding-top:14px;"><div class="section-title">${titulo} <span style="font-size:13px;color:#6B7280;">(${itens.length})</span></div>
+                    <div class="lista-res">
+                    <div class="ag-row head"><div>Data da VD</div><div>Paciente</div><div>ACS</div><div>Motivo</div><div>Solicitado</div><div></div></div>
+                    ${itens.map(c => {
+                        const v = c.destinos.vd, ab = vdAbertas.has(c.id), atras = v.data_prevista && v.data_prevista < h;
+                        return `<div class="ag-row">
+                            <div><input type="date" class="inline-edit" style="${atras ? 'border-color:#DC2626;color:#DC2626;font-weight:700;' : ''}" value="${esc(v.data_prevista)}" title="Alterar a data da VD" onchange="setDestino(${c.id},'vd','data_prevista',this.value,true)"></div>
+                            <div><b>${esc(c.nome)}</b> ${idadeBadge(c)} ${c.prioritario ? '<span class="tag bad" title="ACS considera prioridade">🚩</span>' : ''}</div>
+                            <div>${esc(acsNome(c.acs_responsavel))}</div>
+                            <div style="color:#4B5563;">${esc((v.motivo || c.desfecho || '').slice(0, 110))}${(v.motivo || '').length > 110 ? '…' : ''}</div>
+                            <div style="font-size:11.5px;color:#6B7280;">${fmt(v.solicitado_em)}<br>${esc(v.solicitado_por) || '—'}</div>
+                            <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
+                                <button class="btn-resolve" style="padding:6px 10px;" onclick="marcarVDRealizada(${c.id})">✅ Realizada</button>
+                                <button class="btn-secondary" style="padding:6px 10px;" onclick="toggleVDAberta(${c.id})">${ab ? '▲ Fechar' : '▼ Detalhes'}</button>
+                            </div>
+                        </div>
+                        ${ab ? `<div style="padding:12px;background:#FAF8FF;border-bottom:1px solid #EDE9FE;">${card(c, 'vd')}</div>` : ''}`;
+                    }).join('')}
+                    </div></div>`;
+            }).join('');
+        }
+        function toggleVDAberta(id) { vdAbertas.has(id) ? vdAbertas.delete(id) : vdAbertas.add(id); renderVD(); }
+        function setFiltroUI(tab, key, val) {
+            const sel = document.querySelector(`#f-${tab} select[onchange*="'${key}'"]`);
+            if (sel) sel.value = val;
+            setFiltro(tab, key, val);
+        }
+        function renderPendVD() {
+            const todas = L.pendvd();
+            document.getElementById('pendvd-stats').innerHTML = [
+                ['VDs realizadas', todas.length],
+                ['Docs a entregar', todas.filter(c => !c.destinos.vd.documentos_entregues).length, 'bad'],
+                ['A registrar no sistema', todas.filter(c => !c.destinos.vd.consulta_registrada).length, 'bad'],
+                ['Concluídas', todas.filter(c => pendVDConcluida(c.destinos.vd)).length]
+            ].map(([l, n, cl]) => `<div class="stat ${cl || ''}"><div class="n">${n}</div><div class="l">${l}</div></div>`).join('');
+            let l = aplicarFiltrosBase(todas, 'pendvd');
+            if (F.pendvd.sit === 'pendentes') l = l.filter(c => !pendVDConcluida(c.destinos.vd));
+            if (F.pendvd.sit === 'concluidas') l = l.filter(c => pendVDConcluida(c.destinos.vd));
+            l = filtrarPeriodo(l, 'pendvd', c => c.destinos.vd.data_realizada);
+            renderGrupo('pendvd', l, '🗂️', 'Nenhuma pendência de VD');
+        }
+
+        // ================= RESOLVIDOS (LISTA) =================
+        function caminhoIcones(c) {
+            return Object.keys(DESTINOS).filter(k => c.destinos[k]).map(k => `<span class="tag info" title="${DESTINOS[k].nome}">${DESTINOS[k].icone} ${DESTINOS[k].nome}</span>`).join('') || '<span style="color:#999;font-size:11px;">Resolvido direto</span>';
+        }
+        function detalheDestinos(c) {
+            const p = [], d = c.destinos;
+            if (d.multi) p.push(`<div>👥 <b>Equipe Multi</b> — solicitado em ${fmt(d.multi.solicitado_em)} por ${esc(d.multi.solicitado_por) || '—'}: ${(d.multi.encaminhamentos || []).map(e => esc(e.tipo) + (e.justificativa ? ` (${esc(e.justificativa)})` : '')).join('; ')} ${d.multi.discutido ? '· ✅ discutido' : '· ❓ não discutido'}</div>`);
+            if (d.rede) p.push(`<div>🏥 <b>Rede</b> — solicitado em ${fmt(d.rede.solicitado_em)} por ${esc(d.rede.solicitado_por) || '—'}: ${esc((d.rede.servicos || []).join(', '))} ${d.rede.discutido ? '· ✅ discutido' : '· ❓ não discutido'}</div>`);
+            if (d.vd) p.push(`<div>📍 <b>VD</b> — solicitada em ${fmt(d.vd.solicitado_em)} por ${esc(d.vd.solicitado_por) || '—'} · ${d.vd.realizada ? 'realizada em ' + fmt(d.vd.data_realizada) : 'não realizada'} · docs ${d.vd.documentos_entregues ? '✅' : '⏳'} · registro ${d.vd.consulta_registrada ? '✅' : '⏳'}${d.vd.tarefas ? ` · tarefas: ${esc(d.vd.tarefas)}` : ''}</div>`);
+            if (d.consulta) p.push(`<div>🩺 <b>Consulta</b> — solicitada em ${fmt(d.consulta.solicitado_em)} por ${esc(d.consulta.solicitado_por) || '—'} · com ${esc(d.consulta.com_quem) || '—'} · ${d.consulta.agendamento === 'agendado' ? 'agendada p/ ' + fmt(d.consulta.data_agendada) : 'não agendada'}${d.consulta.comparecimento ? ' · ' + (d.consulta.comparecimento === 'faltou' ? '❌ faltou' : '✅ compareceu') : ''}</div>`);
+            return p.join('');
+        }
+        function renderResolvidos() {
+            let l = aplicarFiltrosBase(L.resolvidos(), 'resolvidos'); const f = F.resolvidos;
+            if (f.destino === 'direto') l = l.filter(c => ativos(c).length === 0);
+            else if (f.destino) l = l.filter(c => !!c.destinos[f.destino]);
+            l = filtrarPeriodo(l, 'resolvidos', c => c.data_resolucao);
+            renderGraficos(L.resolvidos(), 'grafico-acs-resolvidos', 'grafico-linhas-resolvidos');
+            const cont = document.getElementById('resolvidos-content');
+            if (!l.length) { cont.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📭</div><p>Nenhum caso resolvido neste filtro</p></div>'; return; }
+            l.sort((a, b) => ordemMicro(a.acs_responsavel) - ordemMicro(b.acs_responsavel) || (b.data_resolucao || '').localeCompare(a.data_resolucao || ''));
+            cont.innerHTML = `<p style="font-size:12.5px;color:#6B7280;margin-bottom:8px;"><b>${l.length}</b> caso(s) resolvido(s) neste filtro</p><div class="lista-res">
+                <div class="res-row head"><div>Paciente</div><div>Registro</div><div>ACS</div><div>Resolvido em</div><div>Trouxe</div><div>Caminho</div><div></div></div>
+                ${l.map(c => {
+                    const ab = resAbertos.has(c.id);
+                    const hist = [...(c.historico || [])].sort((a, b) => (a.data || '').localeCompare(b.data || ''));
+                    return `<div class="res-row ${ab ? 'aberto' : ''}" onclick="toggleRes(${c.id})">
+                        <div><b>${esc(c.nome)}</b> ${idadeBadge(c)} ${c.prioritario ? '<span class="tag bad" title="ACS considera prioridade">🚩</span>' : ''}</div>
+                        <div>${fmt(c.data_criacao)}</div>
+                        <div>${esc(acsNome(c.acs_responsavel))}</div>
+                        <div>${fmt(c.data_resolucao)}</div>
+                        <div>${esc(c.quem_traz) || '—'}</div>
+                        <div>${caminhoIcones(c)}</div>
+                        <div class="seta">▶</div>
+                    </div>
+                    <div class="res-det ${ab ? 'aberto' : ''}" id="res-det-${c.id}">
+                        ${idStrip(c)}
+                        <div class="bloco"><strong>Descrição:</strong> ${esc(c.descricao)}</div>
+                        <div class="bloco"><strong>Conduta:</strong> ${esc(c.desfecho) || '—'}</div>
+                        ${detalheDestinos(c) ? `<div class="bloco" style="line-height:1.7;"><strong>Destinos:</strong>${detalheDestinos(c)}</div>` : ''}
+                        <div class="bloco"><strong>🧭 Caminho do caso:</strong>
+                            <ul class="timeline">${hist.map(h => `<li><span class="dt">${fmt(h.data)}</span>${esc(h.texto)}</li>`).join('')}</ul></div>
+                        <div class="case-actions">
+                            <button class="btn-secondary" onclick="abrirEdicao(${c.id})">✏️ Editar dados</button>
+                            <button class="btn-secondary" onclick="reabrirCaso(${c.id})">↩️ Reabrir caso</button>
+                            <button class="btn-danger" onclick="deletarCaso(${c.id})">🗑️ Remover</button>
+                        </div>
+                    </div>`;
+                }).join('')}
+            </div>`;
+        }
+        function toggleRes(id) {
+            resAbertos.has(id) ? resAbertos.delete(id) : resAbertos.add(id);
+            const row = document.getElementById('res-det-' + id);
+            row.classList.toggle('aberto'); row.previousElementSibling.classList.toggle('aberto');
+        }
+
+        // ================= GRÁFICOS =================
+        function renderGraficos(lista, cAcs, cLinhas) {
+            const porACS = {}, porLinhas = {};
+            lista.forEach(c => {
+                const n = acsNome(c.acs_responsavel);
+                porACS[n] = (porACS[n] || 0) + 1;
+                (c.linhas_cuidado || []).forEach(l => porLinhas[l] = (porLinhas[l] || 0) + 1);
+            });
+            barChart(cAcs, porACS); barChart(cLinhas, porLinhas);
+        }
+        function barChart(id, data, ordenar = true) {
+            const max = Math.max(...Object.values(data), 1);
+            const keys = ordenar ? Object.keys(data).sort((a, b) => data[b] - data[a]) : Object.keys(data);
+            const html = keys.map(k => `<div class="bar-item"><div class="bar-label" style="min-width:150px;">${esc(k)}</div><div style="flex:1;"><div class="bar-fill" style="width:${Math.max(8, data[k] / max * 100)}%;">${data[k]}</div></div></div>`).join('') || '<p style="color:#999;font-size:12px;">Sem dados</p>';
+            if (id) document.getElementById(id).innerHTML = html;
+            return html;
+        }
+
+        // ================= EDIÇÃO =================
+        function setCampo(id, campo, valor) { const c = getCaso(id); if (!c) return; c[campo] = valor; salvar(); }
+        function setDestino(id, k, campo, valor, rerender) {
+            const c = getCaso(id); if (!c || !c.destinos[k]) return;
+            const d = c.destinos[k];
+            if (d[campo] === valor) return;
+            d[campo] = valor;
+            if (k === 'consulta') {
+                if (campo === 'data_agendada' && valor && d.agendamento !== 'agendado') { d.agendamento = 'agendado'; log(c, `Consulta agendada para ${fmt(valor)}`); }
+                else if (campo === 'data_agendada' && valor) log(c, `Data da consulta alterada para ${fmt(valor)}`);
+                if (campo === 'agendamento') { if (valor === 'agendado') log(c, 'Consulta agendada' + (d.data_agendada ? ` para ${fmt(d.data_agendada)}` : '')); else d.comparecimento = ''; }
+                if (campo === 'comparecimento' && valor) log(c, valor === 'faltou' ? `❌ Faltou à consulta de ${fmt(d.data_agendada)}` : `✅ Compareceu à consulta de ${fmt(d.data_agendada)}`, d.data_agendada || hoje());
+            }
+            if (k === 'vd' && campo === 'data_prevista' && valor) log(c, `VD prevista para ${fmt(valor)}`);
+            salvar();
+            if (rerender) renderizar();
+        }
+
+        function abrirModal(titulo, html) {
+            document.getElementById('modal-titulo').textContent = titulo;
+            document.getElementById('modal-body').innerHTML = html;
+            document.getElementById('modal').classList.add('open');
+        }
+        function fecharModal() { document.getElementById('modal').classList.remove('open'); }
+        window.addEventListener('click', e => { if (e.target.id === 'modal') fecharModal(); });
+
+        function abrirEdicao(id) {
+            const c = getCaso(id); if (!c) return;
+            abrirModal(`✏️ Editar dados — ${c.nome}`, `
+                <div class="form-grid">
+                    <div class="form-group"><label>👤 Nome *</label><input id="e-nome" value="${esc(c.nome)}"></div>
+                    <div class="form-group"><label>🎂 Data de nascimento</label><input type="date" id="e-nasc" value="${esc(c.data_nasc)}"></div>
+                    <div class="form-group"><label>🪪 CPF/CNS</label><input id="e-cpf" value="${esc(c.cpf)}"></div>
+                    <div class="form-group"><label>👨‍👩‍👧 Nº de Família</label><input id="e-fam" value="${esc(c.num_familia)}"></div>
+                    <div class="form-group"><label>🏠 ACS responsável *</label><select id="e-acs">${acsOptions(c.acs_responsavel)}</select></div>
+                    <div class="form-group"><label>🗣️ Quem trouxe o caso</label><select id="e-quem">${profOptions(c.quem_traz)}</select></div>
+                    <div class="form-group"><label>📅 Data do registro</label><input type="date" id="e-data" value="${esc(c.data_criacao)}"></div>
+                    <div class="form-group"><label>…ou outro profissional (texto livre)</label><input id="e-quem-outro" placeholder="Preencha só se não estiver na lista"></div>
+                    <div class="form-group full"><label>📋 Linhas de cuidado</label><div class="checkbox-grid">
+                        ${LINHAS.map(l => `<label class="checkbox-item"><input type="checkbox" class="e-linha" value="${l}" ${c.linhas_cuidado.includes(l) ? 'checked' : ''}> ${l}</label>`).join('')}</div></div>
+                    <div class="form-group full"><label>📝 Descrição</label><textarea id="e-desc">${esc(c.descricao)}</textarea></div>
+                    <div class="form-group full"><label>🎯 Conduta</label><textarea id="e-cond">${esc(c.desfecho)}</textarea></div>
+                </div>
+                <div style="display:flex;gap:10px;"><button class="btn-primary" style="flex:1" onclick="salvarEdicao(${id})">💾 Salvar</button><button class="btn-secondary" onclick="fecharModal()">Cancelar</button></div>`);
+        }
         function salvarEdicao(id) {
             const c = getCaso(id); const v = x => document.getElementById(x).value.trim();
             if (!v('e-nome') || !v('e-acs')) { alert('Nome e ACS são obrigatórios.'); return; }
